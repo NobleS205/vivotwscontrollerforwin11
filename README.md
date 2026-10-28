@@ -1,0 +1,2 @@
+# vivotwscontrollerforwin11
+基于同平台开源项目实现底层协议控制的win11平台上控制vivo耳机功能的一个软件
