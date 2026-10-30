@@ -8,8 +8,8 @@
 from __future__ import annotations
 
 APP_NAME = "VivoPods Controller"
-#: 对外展示的软件版本（关于页第一行：软件版本 V11.45.75）
-APP_VERSION = "11.45.75"
+#: 对外展示的软件版本（关于页第一行：软件版本 V11.45.80）
+APP_VERSION = "11.45.80"
 #: 关于页第二行
 APP_AUTHOR = "芝士火腿肠拌饭"
 

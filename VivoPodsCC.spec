@@ -40,6 +40,9 @@ hiddenimports = (
     + collect_submodules("openfreebuds_backend")
     # 仅在运行时被 Qt 内部引用到的 Qt 模块
     + collect_submodules("PySide6.QtSvg")
+    # v3.28 单实例（QLocalServer / QLocalSocket）在 ui/keepalive.py 里
+    # 是函数内局部 import，显式收进来更稳
+    + ["PySide6.QtNetwork"]
 )
 
 #: 上游 OpenFreebuds 的 HTTP-RPC / 桌面外壳（本程序不使用）；
