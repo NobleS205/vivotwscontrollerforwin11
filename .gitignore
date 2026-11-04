@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# PyInstaller
+build/
+dist/
+*.spec.bak
+# build.bat 会把成品复制到根目录；二进制走 Release，不进仓库
+/VivoPodsCC.exe
+
+# 开发过程中的面板截图（发布时不需要；要展示请放 docs/screenshots/）
+tests/*.png
+
+# 系统杂项
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 本地配置 / 日志（正常不会出现在项目目录，防手滑）
+*.log

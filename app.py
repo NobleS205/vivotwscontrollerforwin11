@@ -35,12 +35,13 @@ from PySide6.QtWidgets import QApplication, QSystemTrayIcon
 
 from appmeta import APP_NAME, APP_VERSION
 from pods.autoconnect import AutoConnectManager
-from pods.detect import HUAWEI, VIVO
+from pods.detect import HUAWEI, VIVO, is_supported_device
 from pods.hub import DeviceInfo, PodsHub
 from ui import keepalive
 from ui.ccwatch import ControlCenterWatcher
 from ui.flyout import FlyoutWindow
 from ui.hotkey import HotkeyManager, IS_WINDOWS
+from ui.power import SessionWatcher
 from ui.tray import TrayController, build_app_icon
 
 
@@ -121,6 +122,17 @@ class VivoPodsApp:
         # 记录 Win+A 热键兜底路径的工作状态（任务 4c）
         self._report_hotkey_status()
 
+        # ---- 睡眠 / 锁屏监控（v3.34）----
+        # 电脑一直开着但夜里睡过一觉，早上回来「后台挂载没了」：进程其实还在，
+        # 是托盘图标被 Windows 重建掉了 + 蓝牙链路断了但控制器还记着「已连接」。
+        # 这里只负责在正确的时机发信号，具体动作在 `_after_resume` 里做。
+        self._last_resume = 0.0
+        self.session = SessionWatcher()
+        self.session.woke.connect(self._on_system_woke)
+        self.session.unlocked.connect(self._on_session_unlocked)
+        if IS_WINDOWS:
+            self.session.start()
+
         # 连接成功后记住设备（品牌一起记，下次可直接路由）
         self.ctrl.connected.connect(self._on_connected)
 
@@ -145,6 +157,10 @@ class VivoPodsApp:
         # 启动策略
         self._bootstrap(argv)
 
+        # v3.33：打包版首次运行（或换了目录）时补一个桌面快捷方式。
+        # 延后 1.2s 再做：要起一次 PowerShell，别占着首屏。
+        QTimer.singleShot(1200, self._ensure_desktop_shortcut)
+
         # 第二个实例发来的 "show" → 唤出已有面板
         keepalive.install_instance_activator(
             self.instance_server, self.flyout.show_flyout)
@@ -163,6 +179,35 @@ class VivoPodsApp:
         if "--restarted" in argv:
             QTimer.singleShot(2500, self._notify_restarted)
 
+    # ------------------------------------------------------------------ #
+    # 桌面快捷方式（v3.33）
+    # ------------------------------------------------------------------ #
+    def _ensure_desktop_shortcut(self) -> None:
+        """在桌面放一个指向 exe 的快捷方式，解压后双击图标即可运行。
+
+        只在打包版生效（源码运行会把快捷方式指到 python.exe）。配置里记着
+        当前 exe、快捷方式也还在，就连 PowerShell 都不起；用户手动删掉后
+        不再反复生成，换了目录则重新指向新位置。
+        """
+        try:
+            from ui import shortcut
+
+            exe = shortcut.exe_path()
+            if not exe:
+                return
+            prev = self.settings.value("shortcut_target", "", type=str)
+            if (prev
+                    and os.path.normcase(prev) == os.path.normcase(exe)
+                    and os.path.exists(shortcut.lnk_path())):
+                return
+            got = shortcut.ensure_desktop_shortcut(prev)
+            if got:
+                self.settings.setValue("shortcut_target", got)
+                keepalive.log_runtime(f"桌面快捷方式就绪：{shortcut.lnk_path()}")
+        except Exception as exc:
+            keepalive.log_runtime(f"桌面快捷方式创建失败：{exc}")
+
+    # ------------------------------------------------------------------ #
     def _notify_restarted(self) -> None:
         """被看门狗重新拉起时提示一次，避免用户以为托盘图标是自己冒出来的。"""
         try:
@@ -173,6 +218,69 @@ class VivoPodsApp:
                 QSystemTrayIcon.Information, 8000)
         except Exception:
             pass
+
+    # ------------------------------------------------------------------ #
+    # 睡眠唤醒 / 解锁（v3.34）
+    # ------------------------------------------------------------------ #
+    def _on_system_woke(self, slept: float) -> None:
+        keepalive.log_runtime(f"检测到系统睡眠唤醒（约 {slept / 60:.0f} 分钟）")
+        # 睡眠时蓝牙必然断开，必须重置链路
+        self._after_resume("睡眠唤醒", reset_link=True)
+
+    def _on_session_unlocked(self) -> None:
+        keepalive.log_runtime("检测到会话解锁")
+        # 只是锁屏（没睡）时蓝牙通常还连着，只重挂托盘，不做无谓的断开重连
+        self._after_resume("解锁", reset_link=False)
+
+    def _after_resume(self, reason: str, reset_link: bool = True) -> None:
+        """睡眠 / 锁屏之后把常驻状态重新拉起来。
+
+        三件事，各自独立兜异常：
+          1. 重挂托盘图标（Windows 唤醒后通知区域会重建，旧图标就"消失"了）；
+          2. 让自动识别丢掉旧快照，按当前真实蓝牙状态重新判断；
+          3. 睡眠唤醒时当前设备若还记着「已连接」，先断开再重连 —— 睡眠时
+             蓝牙必断，控制器状态却是旧的，不重置就不会自己恢复。
+        两个信号可能同时到（唤醒通常伴随解锁），8 秒内只执行一次。
+        """
+        now = time.monotonic()
+        if now - self._last_resume < 8.0:
+            return
+        self._last_resume = now
+        keepalive.log_runtime(f"{reason}：开始恢复后台挂载")
+
+        try:
+            self.tray.remount(reason)
+        except Exception as exc:
+            keepalive.log_runtime(f"{reason}：重挂托盘失败：{exc}")
+
+        try:
+            self.auto.notify_resume()
+        except Exception as exc:
+            keepalive.log_runtime(f"{reason}：重置自动识别失败：{exc}")
+
+        info = self.ctrl.info
+        if info is None or getattr(info, "is_demo", False):
+            return
+        if not is_supported_device(info.name):
+            return
+        if not reset_link:
+            return
+        keepalive.log_runtime(f"{reason}：重置链路并重连 {info.name}（{info.mac}）")
+        try:
+            self.ctrl.disconnect()
+        except Exception:
+            pass
+        QTimer.singleShot(1200, lambda i=info: self._reconnect_after_resume(i))
+
+    def _reconnect_after_resume(self, info) -> None:
+        # 这 1.2 秒里用户可能已经手动选了别的设备，不要把它顶掉
+        cur = self.ctrl.info
+        if cur is not None and (cur.mac or "").upper() != (info.mac or "").upper():
+            return
+        try:
+            self.ctrl.connect_device(info)
+        except Exception as exc:
+            keepalive.log_runtime(f"唤醒重连失败：{exc}")
 
     # ------------------------------------------------------------------ #
     @staticmethod
@@ -245,11 +353,11 @@ class VivoPodsApp:
         last_mac = self.settings.value("last_device_mac", "")
         last_name = self.settings.value("last_device_name", "")
         last_vendor = self.settings.value("last_device_vendor", "", type=str)
-        if last_mac and last_name:
+        if last_mac and last_name and is_supported_device(last_name):
             self.ctrl.connect_device(
                 DeviceInfo(last_name, last_mac, vendor=last_vendor))
         else:
-            # 首次启动：展示浮窗引导连接（面板里会显示自动识别提示）
+            # 首次启动 / 记忆里的设备已不在支持列表：展示浮窗引导连接
             self.flyout.show_flyout()
 
     # ------------------------------------------------------------------ #
@@ -258,6 +366,13 @@ class VivoPodsApp:
     def _on_auto_connected(self, info) -> None:
         # 只做 UI 侧动作；「记住上次设备」放在真正连上之后（_on_connected），
         # 免得把一次失败的自动连接写成下次启动的默认设备
+        #
+        # v3.34：再验一次型号。自动识别已经过滤过，这里兜住将来别的调用方
+        # 直接发信号的情况 —— 名单外的设备（HUAWEI 手机 / 笔记本、未适配的
+        # FreeBuds 7）绝不弹面板。
+        if not is_supported_device(getattr(info, "name", "")):
+            self._auto_log(f"忽略未支持设备：{getattr(info, 'name', '?')}（不弹窗）")
+            return
         self._auto_log(f"自动接管：{info.name}（{info.vendor or '未知品牌'}）")
         if self.auto.auto_show:
             self.flyout.show_flyout(source="auto")
@@ -359,6 +474,10 @@ class VivoPodsApp:
         keepalive.mark_clean_exit()
         try:
             self.auto.stop()
+        except Exception:
+            pass
+        try:
+            self.session.stop()
         except Exception:
             pass
         try:

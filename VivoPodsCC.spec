@@ -70,7 +70,10 @@ a = Analysis(
     pathex=[_VENDOR_DIR],
     binaries=[],
     datas=[("assets/pods.png", "assets"),
-           ("assets/freeclip2.png", "assets")],
+           ("assets/freeclip2.png", "assets"),
+           ("assets/app_icon.png", "assets"),
+           ("assets/app_icon_light.png", "assets"),
+           ("assets/app.ico", "assets")],
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
@@ -96,5 +99,5 @@ exe = EXE(
     runtime_tmpdir=None,
     console=False,
     disable_windowed_traceback=False,
-    icon=None,
+    icon="assets/app.ico",
 )
